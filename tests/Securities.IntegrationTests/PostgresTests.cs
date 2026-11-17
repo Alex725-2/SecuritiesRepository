@@ -311,11 +311,19 @@ public class PostgresTests
                 await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"Accounts\" SET \"FundId\"={other} WHERE \"Id\"={B}");
             }
             var operation=Guid.NewGuid();
-            db.Operations.Add(new Operation {Id=operation,FundId=fund,Type="Transfer",IdempotencyKey=scenario,Fingerprint="test",CreatedAt=DateTimeOffset.UtcNow,CompletedAt=DateTimeOffset.UtcNow});
-            db.Entries.AddRange(new LedgerEntry {Id=Guid.NewGuid(),OperationId=operation,CustodyAccountId=A,SecurityId=S,QuantityDelta=-1,CreatedAt=DateTimeOffset.UtcNow},
-                new LedgerEntry {Id=Guid.NewGuid(),OperationId=operation,CustodyAccountId=target,SecurityId=secondSecurity,QuantityDelta=1,CreatedAt=DateTimeOffset.UtcNow});
-            var error = await Assert.ThrowsAsync<DbUpdateException>(()=>db.SaveChangesAsync());
-            Assert.Equal("23514", Assert.IsType<Npgsql.PostgresException>(error.InnerException).SqlState);
+            await using (var tx = await db.Database.BeginTransactionAsync())
+            {
+                db.Operations.Add(new Operation {Id=operation,FundId=fund,Type="Transfer",IdempotencyKey=scenario,Fingerprint="test",CreatedAt=DateTimeOffset.UtcNow,CompletedAt=DateTimeOffset.UtcNow});
+                db.Entries.AddRange(new LedgerEntry {Id=Guid.NewGuid(),OperationId=operation,CustodyAccountId=A,SecurityId=S,QuantityDelta=-1,CreatedAt=DateTimeOffset.UtcNow},
+                    new LedgerEntry {Id=Guid.NewGuid(),OperationId=operation,CustodyAccountId=target,SecurityId=secondSecurity,QuantityDelta=1,CreatedAt=DateTimeOffset.UtcNow});
+                // The deferred constraint permits INSERTs, but must reject COMMIT.
+                await db.SaveChangesAsync();
+                var error = await Assert.ThrowsAsync<Npgsql.PostgresException>(() => tx.CommitAsync());
+                Assert.Equal("23514", error.SqlState);
+            }
+            await using var check = Db(cs);
+            Assert.False(await check.Operations.AnyAsync(x => x.Id == operation));
+            Assert.False(await check.Entries.AnyAsync(x => x.OperationId == operation));
         }
     }
 

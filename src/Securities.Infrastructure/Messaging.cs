@@ -13,6 +13,11 @@ public sealed class OutboxDispatcher(IServiceScopeFactory scopes, ILogger<Outbox
     /// <summary>One transactional delivery pass, also used by real transport tests.</summary>
     public async Task DispatchOnce(CancellationToken ct = default)
     {
+        // Bound every pass, including callers other than the hosted loop. A broker
+        // reconnect retry must not hold the Outbox transaction indefinitely.
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        attempt.CancelAfter(TimeSpan.FromSeconds(30));
+        ct = attempt.Token;
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AccountingDb>();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
@@ -55,9 +60,7 @@ public sealed class OutboxDispatcher(IServiceScopeFactory scopes, ILogger<Outbox
         {
             try
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                timeout.CancelAfter(TimeSpan.FromSeconds(30));
-                await DispatchOnce(timeout.Token);
+                await DispatchOnce(stoppingToken);
             }
             catch (Exception e)when (!stoppingToken.IsCancellationRequested)
             {

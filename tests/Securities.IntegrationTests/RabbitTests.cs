@@ -8,6 +8,7 @@ using Securities.Domain;
 using Securities.Infrastructure;
 using Testcontainers.PostgreSql;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Securities.IntegrationTests;
 
@@ -23,12 +24,12 @@ public sealed class RabbitFactAttribute : FactAttribute
 }
 
 /// <summary>Verifies the accounting or transport contract.</summary>
-public class RabbitTests
+public class RabbitTests(ITestOutputHelper output)
 {
-    static async Task Eventually(Func<Task<bool>> condition)
+    static async Task Eventually(Func<CancellationToken, Task<bool>> condition)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
-        while (!await condition()) await Task.Delay(200, timeout.Token);
+        while (!await condition(timeout.Token)) await Task.Delay(200, timeout.Token);
     }
 
     /// <summary>Confirms topology, delivery, receipt and DeliveredAt ordering.</summary>
@@ -47,13 +48,14 @@ public class RabbitTests
     [RabbitFact]
     public Task BrokerRecovery() => RealTransportScenario("recovery");
 
-    static async Task RealTransportScenario(string scenario)
+    async Task RealTransportScenario(string scenario)
     {
         await using var postgres = new PostgreSqlBuilder().WithImage("postgres:16-alpine").Build();
         await using var rabbit = new ContainerBuilder().WithImage("rabbitmq:3.13-alpine")
             .WithEnvironment("RABBITMQ_DEFAULT_USER", "demo").WithEnvironment("RABBITMQ_DEFAULT_PASS", "test-password")
             .WithPortBinding(5672, true).WithWaitStrategy(Wait.ForUnixContainer().UntilPortIsAvailable(5672)).Build();
         await Task.WhenAll(postgres.StartAsync(), rabbit.StartAsync());
+        var brokerPort = rabbit.GetMappedPublicPort(5672);
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddDbContext<AccountingDb>(o => o.UseNpgsql(postgres.GetConnectionString()));
@@ -62,7 +64,7 @@ public class RabbitTests
             x.AddConsumer<OperationConsumer>();
             x.UsingRabbitMq((context, cfg) =>
             {
-                cfg.Host(rabbit.Hostname, rabbit.GetMappedPublicPort(5672), "/", h => { h.Username("demo"); h.Password("test-password"); });
+                cfg.Host(rabbit.Hostname, brokerPort, "/", h => { h.Username("demo"); h.Password("test-password"); });
                 cfg.ReceiveEndpoint("securities-operation-completed", e => e.ConfigureConsumer<OperationConsumer>(context));
             });
         });
@@ -83,10 +85,10 @@ public class RabbitTests
             await dispatcher.DispatchOnce(deadline.Token);
             await using (var scope = provider.CreateAsyncScope())
                 Assert.Null((await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<OutboxMessage>().SingleAsync()).DeliveredAt);
-            async Task<bool> HasReceipt()
+            async Task<bool> HasReceipt(CancellationToken ct)
             {
                 await using var scope = provider.CreateAsyncScope();
-                return await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<InboxMessage>().AnyAsync();
+                return await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<InboxMessage>().AnyAsync(ct);
             }
             await Eventually(HasReceipt);
             await dispatcher.DispatchOnce(deadline.Token);
@@ -104,7 +106,7 @@ public class RabbitTests
             {
             var endpoint = await bus.GetSendEndpoint(new Uri("queue:securities-operation-completed"));
             await endpoint.Send(duplicate, deadline.Token); await endpoint.Send(duplicate, deadline.Token);
-            await Eventually(() => Task.FromResult(observer.Messages.Count >= 3));
+            await Eventually(_ => Task.FromResult(observer.Messages.Count >= 3));
             Assert.All(observer.Messages, message => Assert.Equal(duplicate.CompletedAt, message.CompletedAt));
             await using (var scope = provider.CreateAsyncScope())
                 Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<InboxMessage>().CountAsync());
@@ -123,27 +125,74 @@ public class RabbitTests
 
             return;
             }
-            await rabbit.StopAsync();
+            // Stop the actual broker application, not its container. Restarting a
+            // container with a random host port can change the address cached by
+            // the running bus and would test an endpoint move, not reconnection.
+            var stopped = await rabbit.ExecAsync(["rabbitmqctl", "stop_app"], deadline.Token);
+            Assert.True(stopped.ExitCode == 0, stopped.Stderr);
+            await Eventually(_ => Task.FromResult(bus.CheckHealth().Status != BusHealthStatus.Healthy));
+            Guid pendingOperation;
             await using (var scope = provider.CreateAsyncScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<AccountingDb>();
                 var account = await db.Accounts.FirstAsync(); var security = await db.Securities.FirstAsync();
-                await new AccountingService(db).Execute("Credit", new("outage",account.Id,null,security.Id,1,"external","doc"));
+                pendingOperation = (await new AccountingService(db).Execute("Credit", new("outage",account.Id,null,security.Id,1,"external","doc"))).Id;
             }
             using (var unavailable = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
-                await Assert.ThrowsAnyAsync<Exception>(() => dispatcher.DispatchOnce(unavailable.Token));
-            await using (var scope = provider.CreateAsyncScope())
-                Assert.Single(await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<OutboxMessage>().Where(x => x.DeliveredAt == null).ToListAsync());
-            if (scenario == "outage") return;
-            await rabbit.StartAsync();
-            await Eventually(async () =>
             {
-                try { await dispatcher.DispatchOnce(deadline.Token); }
-                catch (Exception) when (!deadline.IsCancellationRequested) { return false; }
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dispatcher.DispatchOnce(unavailable.Token));
+                Assert.True(unavailable.IsCancellationRequested, "The unavailable broker attempt must end at its own deadline.");
+            }
+            await using (var scope = provider.CreateAsyncScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<AccountingDb>();
+                var pending = await db.Set<OutboxMessage>().SingleAsync(x => x.OperationId == pendingOperation);
+                Assert.Null(pending.DeliveredAt);
+                Assert.False(await db.Set<InboxMessage>().AnyAsync(x => x.OperationId == pendingOperation));
+            }
+            if (scenario == "outage") return;
+            var started = await rabbit.ExecAsync(["rabbitmqctl", "start_app"], deadline.Token);
+            Assert.True(started.ExitCode == 0, started.Stderr);
+            Assert.Equal(brokerPort, rabbit.GetMappedPublicPort(5672));
+            // Keep the original bus alive: Healthy includes the reconnected receive
+            // endpoint, not merely a listening TCP port or a newly constructed bus.
+            await Eventually(_ => Task.FromResult(bus.CheckHealth().Status == BusHealthStatus.Healthy));
+            await Eventually(async ct =>
+            {
+                using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                attempt.CancelAfter(TimeSpan.FromSeconds(5));
+                try { await dispatcher.DispatchOnce(attempt.Token); }
+                catch (OperationCanceledException) when (attempt.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    output.WriteLine("Recovery send exceeded its 5-second attempt deadline; retrying within the recovery deadline.");
+                    return false;
+                }
+                catch (RabbitMqConnectionException error) when (!ct.IsCancellationRequested)
+                {
+                    output.WriteLine("Recovery connection is not ready: {0}", error.Message);
+                    return false;
+                }
                 await using var scope = provider.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<AccountingDb>();
-                return await db.Set<InboxMessage>().CountAsync() == 2 && !await db.Set<OutboxMessage>().AnyAsync(x => x.DeliveredAt == null);
+                return await db.Set<InboxMessage>().CountAsync(ct) == 2 && !await db.Set<OutboxMessage>().AnyAsync(x => x.DeliveredAt == null, ct);
             });
+            // Redeliver the recovered event over the same transport and check the
+            // durable idempotent effect, not just successful reconnection.
+            OperationCompleted recovered;
+            await using (var scope = provider.CreateAsyncScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<AccountingDb>();
+                var message = await db.Set<OutboxMessage>().SingleAsync(x => x.OperationId == pendingOperation);
+                var operation = await db.Operations.SingleAsync(x => x.Id == pendingOperation);
+                Assert.NotNull(message.DeliveredAt);
+                recovered = new(message.Id, operation.Id, operation.CompletedAt!.Value);
+            }
+            var receivedBefore = observer.Messages.Count(x => x.OperationId == pendingOperation);
+            var recoveredEndpoint = await bus.GetSendEndpoint(new Uri("queue:securities-operation-completed"));
+            await recoveredEndpoint.Send(recovered, deadline.Token);
+            await Eventually(_ => Task.FromResult(observer.Messages.Count(x => x.OperationId == pendingOperation) > receivedBefore));
+            await using (var scope = provider.CreateAsyncScope())
+                Assert.Equal(1, await scope.ServiceProvider.GetRequiredService<AccountingDb>().Set<InboxMessage>().CountAsync(x => x.OperationId == pendingOperation));
         }
         finally { using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20)); await bus.StopAsync(stop.Token); }
     }
