@@ -1,0 +1,46 @@
+name: Проверка проекта
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      RUN_POSTGRES_TESTS: "1"
+      RUN_RABBITMQ_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.428
+      - run: docker info
+      - run: dotnet restore
+      - run: dotnet build --no-restore --configuration Release
+      - run: dotnet test --no-build --configuration Release --logger "trx;LogFilePrefix=tests"
+      - name: Reject skipped integration or transport tests
+        if: always()
+        shell: python
+        run: |
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob('tests/Securities.IntegrationTests/TestResults/*.trx')
+          assert files, 'Missing integration test report'
+          results = [r for f in files for r in ET.parse(f).iter() if r.tag.endswith('UnitTestResult')]
+          assert results, 'No integration tests executed'
+          assert all(r.get('outcome') == 'Passed' for r in results), [(r.get('testName'), r.get('outcome')) for r in results]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Результаты-тестов
+          path: '**/TestResults/*.trx'
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/securities-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/securities-web/package-lock.json
+      - run: npm ci
+      - run: npm run build

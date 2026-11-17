@@ -1,0 +1,86 @@
+name: securities-repository
+x-api-environment: &api-environment
+  ConnectionStrings__Database: Host=postgres;Database=securities;Username=demo
+  Database__Password: ${POSTGRES_PASSWORD:?Задайте POSTGRES_PASSWORD}
+  Jwt__Key: ${JWT_KEY:?Задайте JWT_KEY}
+  ASPNETCORE_ENVIRONMENT: Development
+  ASPNETCORE_HTTP_PORTS: 8080
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: securities
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задайте POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:5432:5432"]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U demo -d securities"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: demo
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Задайте RABBITMQ_PASSWORD}
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    ports: ["127.0.0.1:15672:15672", "127.0.0.1:5672:5672"]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+  init:
+    build: {context: .., dockerfile: deploy/Dockerfile.api}
+    environment: *api-environment
+    command: [--init]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build: {context: .., dockerfile: deploy/Dockerfile.api}
+    environment: *api-environment
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/api/health]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  worker:
+    build: {context: .., dockerfile: deploy/Dockerfile.worker}
+    environment:
+      ConnectionStrings__Database: Host=postgres;Database=securities;Username=demo
+      Database__Password: ${POSTGRES_PASSWORD}
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: demo
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+    restart: unless-stopped
+    depends_on:
+      init: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, "test -n \"$$(find /tmp/securities-heartbeat -mmin -1 2>/dev/null)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+  frontend:
+    build: {context: .., dockerfile: deploy/Dockerfile.frontend}
+    ports: ["127.0.0.1:3000:80"]
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+volumes:
+  postgres-data:
+  rabbitmq-data:
