@@ -22,15 +22,15 @@ public class Fund
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор управляющей компании фонда.</summary>
     public Guid ManagementCompanyId { get; set; }
     /// <summary>Уникальный код справочника.</summary>
     public string Code { get; set; } = "";
     /// <summary>Наименование.</summary>
     public string Name { get; set; } = "";
-    /// <summary>Данные FundType.</summary>
+    /// <summary>Тип фонда в справочнике. Значение по умолчанию — Open.</summary>
     public string FundType { get; set; } = "Open";
-    /// <summary>Состояние записи.</summary>
+    /// <summary>Статус справочника: Active — активен, Closed — закрыт.</summary>
     public string Status { get; set; } = "Active";
 }
 
@@ -39,17 +39,17 @@ public class Security
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Данные ISIN.</summary>
+    /// <summary>Международный идентификационный код ценной бумаги.</summary>
     public string ISIN { get; set; } = "";
-    /// <summary>Данные Ticker.</summary>
+    /// <summary>Биржевой тикер бумаги.</summary>
     public string Ticker { get; set; } = "";
     /// <summary>Наименование.</summary>
     public string Name { get; set; } = "";
     /// <summary>Трёхбуквенный код валюты.</summary>
     public string Currency { get; set; } = "RUB";
-    /// <summary>Данные SecurityType.</summary>
+    /// <summary>Тип бумаги в справочнике. Например, Share — акция.</summary>
     public string SecurityType { get; set; } = "Share";
-    /// <summary>Данные IsActive.</summary>
+    /// <summary>Признак доступности бумаги для проведения операций.</summary>
     public bool IsActive { get; set; } = true;
 }
 
@@ -80,24 +80,24 @@ public class CustodyAccount
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор фонда.</summary>
     public Guid FundId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор депозитария хранения.</summary>
     public Guid CustodianId { get; set; }
-    /// <summary>Данные AccountNumber.</summary>
+    /// <summary>Номер счёта хранения в депозитарии.</summary>
     public string AccountNumber { get; set; } = "";
-    /// <summary>Состояние записи.</summary>
+    /// <summary>Статус справочника: Active — активен, Closed — закрыт.</summary>
     public string Status { get; set; } = "Active";
 }
 
 /// <summary>Текущий остаток бумаги на счёте.</summary>
 public class Position
 {
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор счёта хранения.</summary>
     public Guid CustodyAccountId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор ценной бумаги.</summary>
     public Guid SecurityId { get; set; }
-    /// <summary>Текущий неотрицательный остаток.</summary>
+    /// <summary>Текущий неотрицательный остаток. Передаётся JSON-строкой, например "25".</summary>
     public decimal Quantity { get; set; }
     /// <summary>Версия позиции для контроля конкурентности.</summary>
     public long Version { get; set; }
@@ -108,17 +108,17 @@ public class Operation
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Данные Type.</summary>
+    /// <summary>Вид движения: Credit — зачисление, Debit — списание, Transfer — перевод, Reverse — корректировка.</summary>
     public string Type { get; set; } = "";
-    /// <summary>Состояние записи.</summary>
+    /// <summary>Статус сохранённой операции: Completed.</summary>
     public string Status { get; set; } = "Completed";
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Необязательная ссылка на запись во внешней системе.</summary>
     public string? ExternalId { get; set; }
-    /// <summary>Уникальный ключ повторяемой команды.</summary>
+    /// <summary>Уникальный ключ команды. Повтор с тем же ключом и параметрами возвращает эту операцию.</summary>
     public string IdempotencyKey { get; set; } = "";
-    /// <summary>Хеш типа и всех параметров команды.</summary>
+    /// <summary>Серверный хеш SHA-256 параметров команды. Позволяет обнаружить изменённые параметры при повторе с тем же ключом.</summary>
     public string Fingerprint { get; set; } = "";
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор фонда.</summary>
     public Guid FundId { get; set; }
     /// <summary>Исходная операция для единственной корректировки.</summary>
     public Guid? ReversesOperationId { get; set; }
@@ -130,7 +130,7 @@ public class Operation
     public DateTimeOffset CreatedAt { get; set; }
     /// <summary>Момент фиксации события в UTC.</summary>
     public DateTimeOffset? CompletedAt { get; set; }
-    /// <summary>Данные ErrorMessage.</summary>
+    /// <summary>Поле сообщения об ошибке. В завершённой операции обычно равно null.</summary>
     public string? ErrorMessage { get; set; }
 }
 
@@ -139,13 +139,13 @@ public class LedgerEntry
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор операции, создавшей проводку.</summary>
     public Guid OperationId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор счёта хранения.</summary>
     public Guid CustodyAccountId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор ценной бумаги.</summary>
     public Guid SecurityId { get; set; }
-    /// <summary>Знаковое изменение количества бумаг.</summary>
+    /// <summary>Знаковое изменение количества бумаг. Передаётся JSON-строкой, например "25".</summary>
     public decimal QuantityDelta { get; set; }
     /// <summary>Момент фиксации события в UTC.</summary>
     public DateTimeOffset CreatedAt { get; set; }
@@ -154,11 +154,11 @@ public class LedgerEntry
 /// <summary>Цена бумаги на конкретную дату.</summary>
 public class SecurityPrice
 {
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор ценной бумаги.</summary>
     public Guid SecurityId { get; set; }
-    /// <summary>Дата действия исторической записи.</summary>
+    /// <summary>Дата котировки в формате ГГГГ-ММ-ДД.</summary>
     public DateOnly PriceDate { get; set; }
-    /// <summary>Неотрицательная цена единицы бумаги.</summary>
+    /// <summary>Неотрицательная цена единицы бумаги. Передаётся JSON-строкой, например "25".</summary>
     public decimal Price { get; set; }
     /// <summary>Трёхбуквенный код валюты.</summary>
     public string Currency { get; set; } = "RUB";
@@ -169,15 +169,15 @@ public class SecurityPrice
 /// <summary>Сохранённая упрощённая оценка фонда.</summary>
 public class FundValuation
 {
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор фонда.</summary>
     public Guid FundId { get; set; }
-    /// <summary>Дата действия исторической записи.</summary>
+    /// <summary>Дата оценки в формате ГГГГ-ММ-ДД.</summary>
     public DateOnly ValuationDate { get; set; }
-    /// <summary>Оценка активов в одной валюте.</summary>
+    /// <summary>Стоимость активов в валюте оценки. Передаётся JSON-строкой, например "25".</summary>
     public decimal TotalAssets { get; set; }
-    /// <summary>Обязательства фонда в валюте оценки.</summary>
+    /// <summary>Обязательства фонда в валюте оценки. Передаётся JSON-строкой, например "25".</summary>
     public decimal TotalLiabilities { get; set; }
-    /// <summary>Разность стоимости активов и обязательств.</summary>
+    /// <summary>Разность стоимости активов и обязательств. Передаётся JSON-строкой, например "25".</summary>
     public decimal NAV { get; set; }
     /// <summary>Трёхбуквенный код валюты.</summary>
     public string Currency { get; set; } = "RUB";
@@ -186,11 +186,11 @@ public class FundValuation
 /// <summary>Историческое количество паёв.</summary>
 public class FundUnits
 {
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор фонда.</summary>
     public Guid FundId { get; set; }
-    /// <summary>Дата действия исторической записи.</summary>
+    /// <summary>Дата начала действия количества паёв в формате ГГГГ-ММ-ДД.</summary>
     public DateOnly EffectiveDate { get; set; }
-    /// <summary>Количество паёв на дату, строго больше нуля.</summary>
+    /// <summary>Положительное количество паёв на дату. Передаётся JSON-строкой, например "25".</summary>
     public decimal UnitsOutstanding { get; set; }
 }
 
@@ -199,11 +199,11 @@ public class ReconciliationRun
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор фонда.</summary>
     public Guid FundId { get; set; }
     /// <summary>Момент фиксации события в UTC.</summary>
     public DateTimeOffset CreatedAt { get; set; }
-    /// <summary>Данные Items.</summary>
+    /// <summary>Строки сравнения остатков по парам счёт и бумага.</summary>
     public List<ReconciliationItem> Items { get; set; } = [];
 }
 
@@ -212,15 +212,15 @@ public class ReconciliationItem
 {
     /// <summary>Уникальный идентификатор.</summary>
     public Guid Id { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор сверки, к которой относится сравнение.</summary>
     public Guid ReconciliationRunId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор счёта хранения.</summary>
     public Guid CustodyAccountId { get; set; }
-    /// <summary>Ссылка на связанную сущность.</summary>
+    /// <summary>Идентификатор ценной бумаги.</summary>
     public Guid SecurityId { get; set; }
-    /// <summary>Ожидаемый контрольный остаток.</summary>
+    /// <summary>Контрольный остаток. Передаётся JSON-строкой, например "25".</summary>
     public decimal Expected { get; set; }
-    /// <summary>Фактический внутренний остаток.</summary>
+    /// <summary>Внутренний остаток на момент сверки. Передаётся JSON-строкой, например "25".</summary>
     public decimal Actual { get; set; }
 }
 

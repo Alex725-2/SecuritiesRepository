@@ -5,7 +5,6 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi.Models;
 using Securities.Application;
 using Securities.Domain;
 using Securities.Infrastructure;
@@ -31,13 +30,7 @@ builder.Services.AddAuthorization(o =>
     o.AddPolicy("Write", p => p.RequireRole("Admin", "Operator"));
 });
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(o =>
-{
-    o.MapType<decimal>(() => new OpenApiSchema { Type = "string", Format = "decimal", Example = new Microsoft.OpenApi.Any.OpenApiString("123.45678901") });
-    o.SwaggerDoc("v1", new OpenApiInfo { Title = "Демонстрационный учёт фондов", Version = "v1" });
-    o.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = "JWT" });
-    o.AddSecurityRequirement(new OpenApiSecurityRequirement { [new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" } }] = Array.Empty<string>() });
-});
+builder.Services.AddSwaggerGen(ApiDocumentation.Configure);
 var app = builder.Build();
 app.Use(async (ctx, next) =>
 {
@@ -81,32 +74,79 @@ if (app.Environment.IsDevelopment())
             return Results.BadRequest(new { error = "Неизвестная роль." });
         var token = new JwtSecurityToken("securities-demo", "securities-demo", [new Claim(ClaimTypes.Name, "Демонстрационный пользователь"), new Claim(ClaimTypes.Role, login.Role)], expires: DateTime.UtcNow.AddHours(1), signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)), SecurityAlgorithms.HmacSha256));
         return Results.Ok(new { accessToken = new JwtSecurityTokenHandler().WriteToken(token) });
-    });
-app.MapGet("/api/health", async (AccountingDb db, CancellationToken ct) => await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "Healthy" }) : Results.StatusCode(503));
+    })
+    .WithSummary("Получить демонстрационный JWT")
+    .WithDescription("Доступно только в Development. Токен действует один час.")
+    .Produces<TokenResponse>();
+app.MapGet("/api/health", async (AccountingDb db, CancellationToken ct) => await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "Healthy" }) : Results.StatusCode(503))
+    .WithSummary("Проверить доступность базы данных")
+    .WithDescription("Проверяет подключение API к PostgreSQL.")
+    .Produces<HealthResponse>();
 var read = app.MapGroup("/api").RequireAuthorization("Read");
-read.MapGet("/management-companies", async (AccountingDb db, CancellationToken ct) => await db.Set<ManagementCompany>().AsNoTracking().ToListAsync(ct));
-read.MapGet("/funds", async (AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct));
-read.MapGet("/funds/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } fund ? Results.Ok(fund) : Results.NotFound());
+read.MapGet("/management-companies", async (AccountingDb db, CancellationToken ct) => await db.Set<ManagementCompany>().AsNoTracking().ToListAsync(ct))
+    .WithSummary("Получить управляющие компании")
+    .WithDescription("Возвращает справочник управляющих компаний фондов.");
+read.MapGet("/funds", async (AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct))
+    .WithSummary("Получить фонды")
+    .WithDescription("Возвращает фонды в порядке их кодов.");
+read.MapGet("/funds/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } fund ? Results.Ok(fund) : Results.NotFound())
+    .WithSummary("Получить карточку фонда")
+    .WithDescription("Возвращает реквизиты фонда и ссылку на управляющую компанию.")
+    .Produces<Fund>();
 read.MapGet("/funds/{id:guid}/positions", async (Guid id, AccountingDb db, CancellationToken ct) => await (
     from p in db.Positions.AsNoTracking()join a in db.Accounts on p.CustodyAccountId equals a.Id
     join s in db.Securities on p.SecurityId equals s.Id
     where a.FundId == id
-    select new { p.CustodyAccountId, a.AccountNumber, p.SecurityId, s.Ticker, s.Name, p.Quantity, p.Version }).ToListAsync(ct));
-read.MapGet("/funds/{id:guid}/operations", async (Guid id, int? offset, int? limit, AccountingDb db, CancellationToken ct) => await db.Operations.AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.CreatedAt).ThenBy(x => x.Id).Skip(Math.Max(0, offset ?? 0)).Take(Math.Clamp(limit ?? 100, 1, 200)).ToListAsync(ct));
-read.MapGet("/securities", async (AccountingDb db, CancellationToken ct) => await db.Securities.AsNoTracking().ToListAsync(ct));
-read.MapGet("/custodians", async (AccountingDb db, CancellationToken ct) => await db.Set<Custodian>().AsNoTracking().ToListAsync(ct));
-read.MapGet("/accounts", async (AccountingDb db, CancellationToken ct) => await db.Accounts.AsNoTracking().ToListAsync(ct));
-read.MapGet("/operations/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Operations.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } operation ? Results.Ok(new { Operation = operation, Entries = await db.Entries.AsNoTracking().Where(x => x.OperationId == id).ToListAsync(ct) }) : Results.NotFound());
+    select new { p.CustodyAccountId, a.AccountNumber, p.SecurityId, s.Ticker, s.Name, p.Quantity, p.Version }).ToListAsync(ct))
+    .WithSummary("Получить позиции фонда")
+    .WithDescription("Возвращает текущие остатки по парам счёт хранения и ценная бумага. Позиции изменяются при проведении операций.")
+    .Produces<List<PositionResponse>>();
+read.MapGet("/funds/{id:guid}/operations", async (Guid id, int? offset, int? limit, AccountingDb db, CancellationToken ct) => await db.Operations.AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.CreatedAt).ThenBy(x => x.Id).Skip(Math.Max(0, offset ?? 0)).Take(Math.Clamp(limit ?? 100, 1, 200)).ToListAsync(ct))
+    .WithSummary("Получить журнал операций фонда")
+    .WithDescription("Возвращает операции от новых к старым, при совпадении времени сортирует по идентификатору. Поддерживает пагинацию.");
+read.MapGet("/securities", async (AccountingDb db, CancellationToken ct) => await db.Securities.AsNoTracking().ToListAsync(ct))
+    .WithSummary("Получить ценные бумаги")
+    .WithDescription("Возвращает справочник, включая неактивные бумаги.");
+read.MapGet("/custodians", async (AccountingDb db, CancellationToken ct) => await db.Set<Custodian>().AsNoTracking().ToListAsync(ct))
+    .WithSummary("Получить депозитарии")
+    .WithDescription("Возвращает справочник организаций, в которых открыты счета хранения.");
+read.MapGet("/accounts", async (AccountingDb db, CancellationToken ct) => await db.Accounts.AsNoTracking().ToListAsync(ct))
+    .WithSummary("Получить счета хранения")
+    .WithDescription("Возвращает счета всех фондов с указанием фонда, депозитария и статуса.");
+read.MapGet("/operations/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Operations.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } operation ? Results.Ok(new { Operation = operation, Entries = await db.Entries.AsNoTracking().Where(x => x.OperationId == id).ToListAsync(ct) }) : Results.NotFound())
+    .WithSummary("Получить операцию и её проводки")
+    .WithDescription("Возвращает запись журнала и проводки со знаковым изменением количества по каждому затронутому счёту.")
+    .Produces<OperationDetailsResponse>();
 var write = app.MapGroup("/api").RequireAuthorization("Write");
-write.MapPost("/operations/credit", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Credit", r, ct));
-write.MapPost("/operations/debit", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Debit", r, ct));
-write.MapPost("/operations/transfer", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Transfer", r, ct));
-write.MapPost("/operations/{id:guid}/reverse", (Guid id, ReverseRequest r, AccountingService s, CancellationToken ct) => s.Reverse(id, r, ct));
-write.MapPost("/reconciliations", (ReconcileRequest r, PortfolioService s, CancellationToken ct) => s.Reconcile(r, ct));
-read.MapGet("/reconciliations/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<ReconciliationRun>().Include(x => x.Items).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } run ? Results.Ok(run) : Results.NotFound());
-read.MapGet("/funds/{id:guid}/reconciliations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<ReconciliationRun>().Include(x => x.Items).AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.CreatedAt).Take(20).ToListAsync(ct));
-write.MapPost("/valuations", (ValuationRequest r, PortfolioService s, CancellationToken ct) => s.Value(r, ct));
-read.MapGet("/funds/{id:guid}/valuations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<FundValuation>().AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.ValuationDate).Take(100).ToListAsync(ct));
+write.MapPost("/operations/credit", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Credit", r, ct))
+    .WithSummary("Зачислить бумаги")
+    .WithDescription("Credit увеличивает остаток на выбранном счёте одной проводкой. Укажите внешний источник и документ-основание.");
+write.MapPost("/operations/debit", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Debit", r, ct))
+    .WithSummary("Списать бумаги")
+    .WithDescription("Debit уменьшает остаток на выбранном счёте одной проводкой. Укажите внешнего получателя и документ-основание. При недостаточном остатке возвращается 422.");
+write.MapPost("/operations/transfer", (MovementRequest r, AccountingService s, CancellationToken ct) => s.Execute("Transfer", r, ct))
+    .WithSummary("Перевести бумаги между счетами")
+    .WithDescription("Transfer списывает бумаги с одного счёта и зачисляет на другой счёт того же фонда. Две проводки имеют равные по модулю количества и противоположные знаки.");
+write.MapPost("/operations/{id:guid}/reverse", (Guid id, ReverseRequest r, AccountingService s, CancellationToken ct) => s.Reverse(id, r, ct))
+    .WithSummary("Скорректировать операцию")
+    .WithDescription("Reverse создаёт проводки с обратными знаками и сохраняет исходную операцию. Исходную операцию можно скорректировать один раз. Требуются причина и достаточный остаток для обратного движения.");
+write.MapPost("/reconciliations", (ReconcileRequest r, PortfolioService s, CancellationToken ct) => s.Reconcile(r, ct))
+    .WithSummary("Выполнить сверку фонда")
+    .WithDescription("Сравнивает полный контрольный набор с текущими остатками. Пропущенная пара считается нулевой, дубликаты и отрицательные количества отклоняются. Результат сохраняется без изменения позиций.");
+read.MapGet("/reconciliations/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<ReconciliationRun>().Include(x => x.Items).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } run ? Results.Ok(run) : Results.NotFound())
+    .WithSummary("Получить результат сверки")
+    .WithDescription("Возвращает сохранённую сверку с контрольными и внутренними остатками.")
+    .Produces<ReconciliationRun>();
+read.MapGet("/funds/{id:guid}/reconciliations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<ReconciliationRun>().Include(x => x.Items).AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.CreatedAt).Take(20).ToListAsync(ct))
+    .WithSummary("Получить сверки фонда")
+    .WithDescription("Возвращает до 20 последних сверок фонда вместе со строками сравнения.");
+write.MapPost("/valuations", (ValuationRequest r, PortfolioService s, CancellationToken ct) => s.Value(r, ct))
+    .WithSummary("Рассчитать стоимость фонда и пая")
+    .WithDescription("Восстанавливает позиции по журналу на конец даты UTC. Использует котировки на эту дату в единой валюте и последние доступные на дату данные о паях. Сохраняет оценку по паре фонд и дата.")
+    .Produces<ValuationResponse>();
+read.MapGet("/funds/{id:guid}/valuations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<FundValuation>().AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.ValuationDate).Take(100).ToListAsync(ct))
+    .WithSummary("Получить оценки фонда")
+    .WithDescription("Возвращает до 100 сохранённых оценок, начиная с самой поздней даты.");
 write.MapPut("/prices", async (SecurityPrice r, AccountingDb db, CancellationToken ct) =>
 {
     if (r.Price < 0 || string.IsNullOrWhiteSpace(r.Source) || (string.IsNullOrWhiteSpace(r.Currency) || !System.Text.RegularExpressions.Regex.IsMatch(r.Currency, "^[A-Z]{3}$")))
@@ -118,7 +158,10 @@ write.MapPut("/prices", async (SecurityPrice r, AccountingDb db, CancellationTok
         db.Entry(existing).CurrentValues.SetValues(r);
     await db.SaveChangesAsync(ct);
     return Results.Ok(r);
-});
+})
+    .WithSummary("Сохранить котировку")
+    .WithDescription("Добавляет или заменяет котировку бумаги на указанную дату. Цена неотрицательна, источник обязателен, валюта задаётся тремя заглавными латинскими буквами.")
+    .Produces<SecurityPrice>();
 write.MapPut("/fund-units", async (FundUnits r, AccountingDb db, CancellationToken ct) =>
 {
     AccountingRules.Positive(r.UnitsOutstanding);
@@ -129,7 +172,10 @@ write.MapPut("/fund-units", async (FundUnits r, AccountingDb db, CancellationTok
         existing.UnitsOutstanding = r.UnitsOutstanding;
     await db.SaveChangesAsync(ct);
     return Results.Ok(r);
-});
+})
+    .WithSummary("Сохранить количество паёв")
+    .WithDescription("Добавляет или заменяет положительное количество паёв фонда на дату начала действия.")
+    .Produces<FundUnits>();
 if (args.Contains("--schema"))
 {
     await using var scope = app.Services.CreateAsyncScope();
@@ -148,4 +194,5 @@ if (args.Contains("--init"))
 
 await app.RunAsync();
 /// <summary>Запрос тестовой роли; доступен только в Development.</summary>
+/// <param name="Role">Роль токена: Admin, Operator или Auditor.</param>
 public record DevLogin(string Role);
