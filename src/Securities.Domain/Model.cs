@@ -303,9 +303,22 @@ public static class AccountingRules
     public static decimal TotalValue(IEnumerable<(decimal Quantity, decimal Price)> components)
     {
         var total = components.Aggregate(System.Numerics.BigInteger.Zero,
-            (sum, item) => sum + Scaled(item.Quantity) * Scaled(item.Price));
+            (sum, item) => sum + ScaledProduct(item.Quantity, item.Price));
         return RoundRatio(total, 100000000);
     }
+
+    /// <summary>Formats the exact product of two fixed-point amounts without rounding.</summary>
+    public static string ExactPositionValue(decimal quantity, decimal price)
+    {
+        var product = ScaledProduct(quantity, price);
+        var digits = System.Numerics.BigInteger.Abs(product)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture).PadLeft(17, '0');
+        var fraction = digits[^16..].TrimEnd('0');
+        return (product.Sign < 0 ? "-" : "") + digits[..^16] + (fraction.Length > 0 ? "." + fraction : "");
+    }
+
+    static System.Numerics.BigInteger ScaledProduct(decimal quantity, decimal price) =>
+        Scaled(quantity) * Scaled(price);
 
     static System.Numerics.BigInteger Scaled(decimal value) =>
         System.Numerics.BigInteger.Parse(Normalize(value).ToString("F8", System.Globalization.CultureInfo.InvariantCulture).Replace(".", ""), System.Globalization.CultureInfo.InvariantCulture);

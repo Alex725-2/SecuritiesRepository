@@ -32,6 +32,8 @@ builder.Services.AddAuthorization(o =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(ApiDocumentation.Configure);
 var app = builder.Build();
+
+// Централизоанный MiddleWare для перехвата ошибок
 app.Use(async (ctx, next) =>
 {
     try
@@ -56,6 +58,8 @@ app.Use(async (ctx, next) =>
         };
         if (status is 500 or 503)
             app.Logger.LogError(ex, "Ошибка запроса.");
+        // тут особо круто, 500 и 503 - ошибки сервера, могут например содержать таблицы или другую важную информацию, такое клиенту
+        // показывать нельзя
         await Results.Problem(statusCode: status, title: status is 500 or 503 ? "Внутренняя ошибка сервера." : ex is DbUpdateException ? "Конфликт ограничений данных." : ex.Message).ExecuteAsync(ctx);
     }
 });
@@ -89,10 +93,18 @@ read.MapGet("/management-companies", async (AccountingDb db, CancellationToken c
 read.MapGet("/funds", async (AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct))
     .WithSummary("Получить фонды")
     .WithDescription("Возвращает фонды в порядке их кодов.");
-read.MapGet("/funds/{id:guid}", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Funds.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)is { } fund ? Results.Ok(fund) : Results.NotFound())
+read.MapGet("/funds/{id:guid}", async (Guid id, AccountingDb db, PortfolioService service, CancellationToken ct) =>
+{
+    var fund = await db.Funds.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
+    if (fund is null)
+        return Results.NotFound();
+    var units = await service.UnitsOnDate(id, DateOnly.FromDateTime(DateTime.UtcNow), ct);
+    return Results.Ok(new FundDetailsResponse(fund.Id, fund.ManagementCompanyId, fund.Code,
+        fund.Name, fund.FundType, fund.Status, units));
+})
     .WithSummary("Получить карточку фонда")
-    .WithDescription("Возвращает реквизиты фонда и ссылку на управляющую компанию.")
-    .Produces<Fund>();
+    .WithDescription("Возвращает реквизиты фонда и количество паёв, действующее на текущую дату UTC.")
+    .Produces<FundDetailsResponse>();
 read.MapGet("/funds/{id:guid}/positions", async (Guid id, AccountingDb db, CancellationToken ct) => await (
     from p in db.Positions.AsNoTracking()join a in db.Accounts on p.CustodyAccountId equals a.Id
     join s in db.Securities on p.SecurityId equals s.Id

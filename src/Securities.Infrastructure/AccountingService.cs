@@ -19,6 +19,8 @@ public sealed class AccountingService(AccountingDb db)
     async Task LockKey(string key, CancellationToken ct, int lockNamespace = 1)
     {
         // Коллизия хеша только сериализует независимые запросы; уникальность обеспечивает индекс.
+        // pg_advisory_xact_lock - логическая блокировка (не строки таблицы), тут применяю чтобы избежать гонки (race condition)
+        //
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({lockNamespace}, hashtext({key}))", ct);
     }
 

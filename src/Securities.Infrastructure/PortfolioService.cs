@@ -7,8 +7,15 @@ namespace Securities.Infrastructure;
 /// <summary>Упрощённая оценка и ручная сверка снимка позиций.</summary>
 public sealed class PortfolioService(AccountingDb db)
 {
+    /// <summary>Возвращает последнее действующее на указанную дату количество паёв фонда.</summary>
+    public Task<decimal?> UnitsOnDate(Guid fundId, DateOnly date, CancellationToken ct) =>
+        db.Set<FundUnits>().Where(x => x.FundId == fundId && x.EffectiveDate <= date)
+            .OrderByDescending(x => x.EffectiveDate)
+            .Select(x => (decimal?)x.UnitsOutstanding)
+            .FirstOrDefaultAsync(ct);
+
     /// <summary>Оценивает количество по обязательной котировке.</summary>
-    public async Task<object> Value(ValuationRequest r, CancellationToken ct)
+    public async Task<ValuationResponse> Value(ValuationRequest r, CancellationToken ct)
     {
         if (r.Liabilities < 0 || (string.IsNullOrWhiteSpace(r.Currency) || !System.Text.RegularExpressions.Regex.IsMatch(r.Currency, "^[A-Z]{3}$")) || r.Date > DateOnly.FromDateTime(DateTime.UtcNow))
             throw new BusinessException("Проверьте дату, валюту и обязательства.");
@@ -29,7 +36,7 @@ public sealed class PortfolioService(AccountingDb db)
                 }
 
         ).ToListAsync(ct);
-        var components = new List<(decimal Quantity, decimal Price)>();
+        var positions = new List<(Security Security, decimal Quantity, decimal Price)>();
         foreach (var p in quantities.Where(x => x.Quantity != 0))
         {
             var price = await db.Set<SecurityPrice>().SingleOrDefaultAsync(x => x.SecurityId == p.SecurityId && x.PriceDate == r.Date, ct);
@@ -38,11 +45,11 @@ public sealed class PortfolioService(AccountingDb db)
             var security = await db.Securities.SingleAsync(x => x.Id == p.SecurityId, ct);
             if (price.Currency != r.Currency || security.Currency != r.Currency)
                 throw new BusinessException("Валюты различаются; конвертация в MVP отсутствует.");
-            components.Add((p.Quantity, price.Price));
+            positions.Add((security, p.Quantity, price.Price));
         }
 
-        var units = await db.Set<FundUnits>().Where(x => x.FundId == r.FundId && x.EffectiveDate <= r.Date).OrderByDescending(x => x.EffectiveDate).FirstOrDefaultAsync(ct);
-        if (units is null || units.UnitsOutstanding <= 0)
+        var units = await UnitsOnDate(r.FundId, r.Date, ct);
+        if (units is null or <= 0)
             throw new BusinessException("Нет положительного количества паёв.");
         var valuation = await db.Set<FundValuation>().FindAsync([r.FundId, r.Date], ct);
         if (valuation is null)
@@ -55,19 +62,19 @@ public sealed class PortfolioService(AccountingDb db)
             db.Add(valuation);
         }
 
-        var assets = AccountingRules.TotalValue(components);
+        var assets = AccountingRules.TotalValue(positions.Select(p => (p.Quantity, p.Price)));
         valuation.TotalAssets = assets;
         valuation.TotalLiabilities = AccountingRules.Normalize(r.Liabilities);
         valuation.NAV = AccountingRules.Normalize(assets - valuation.TotalLiabilities);
         valuation.Currency = r.Currency;
-        var unitPrice = AccountingRules.UnitPrice(valuation.NAV, units.UnitsOutstanding);
+        var unitPrice = AccountingRules.UnitPrice(valuation.NAV, units.Value);
+        var details = positions.OrderBy(p => p.Security.Ticker, StringComparer.Ordinal).ThenBy(p => p.Security.Id)
+            .Select(p => new ValuationPosition(p.Security.Id, p.Security.Ticker, p.Security.Name,
+                p.Quantity, p.Price, AccountingRules.ExactPositionValue(p.Quantity, p.Price)))
+            .ToList();
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
-        return new
-        {
-            Valuation = valuation,
-            UnitPrice = unitPrice
-        };
+        return new ValuationResponse(valuation, unitPrice, units.Value, details);
     }
 
     /// <summary>Сохраняет сверку полного набора контрольных остатков.</summary>

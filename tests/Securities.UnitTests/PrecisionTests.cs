@@ -29,6 +29,10 @@ public class PrecisionTests
     [Fact]
     public void ValuationRoundsOnceAndPreservesLargeFractions()
     {
+        Assert.Equal("0.000000005", AccountingRules.ExactPositionValue(0.00000001m, 0.5m));
+        Assert.Equal("9007199254740993.12345678", AccountingRules.ExactPositionValue(9007199254740993.12345678m, 1m));
+        Assert.Equal("999999999999.9999999999999999",
+            AccountingRules.ExactPositionValue(99999999999999999999.99999999m, 0.00000001m));
         Assert.Equal(0.00000001m, AccountingRules.TotalValue([(0.00000001m, 0.5m), (0.00000001m, 0.5m)]));
         Assert.Equal(9007199254740993.12345678m, AccountingRules.TotalValue([(9007199254740993.12345678m, 1m)]));
         Assert.Throws<BusinessException>(() => AccountingRules.TotalValue([(99999999999999999999m, 2m)]));

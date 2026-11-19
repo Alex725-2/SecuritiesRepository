@@ -159,7 +159,7 @@ internal sealed class ApiDocumentation : IOperationFilter
                 "api/dev/token" => new { accessToken = "<JWT из ответа сервера>" },
                 "api/management-companies" => new[] { new { id = CompanyId, name = "Демо УК", inn = "0000000000" } },
                 "api/funds" => new[] { fund },
-                "api/funds/{id}" => fund,
+                "api/funds/{id}" => new { fund.id, fund.managementCompanyId, fund.code, fund.name, fund.fundType, fund.status, unitsOutstanding = "100" },
                 "api/custodians" => new[] { new { id = CustodianId, code = "DEMO-CUSTODY", name = "Учебный депозитарий" } },
                 "api/accounts" => new[] { new { id = AccountId, fundId = FundId, custodianId = CustodianId,
                     accountNumber = "DEMO-001", status = "Active" } },
@@ -176,7 +176,10 @@ internal sealed class ApiDocumentation : IOperationFilter
                 },
                 "api/funds/{id}/positions" => new[] { new { custodyAccountId = AccountId, accountNumber = "DEMO-001",
                     securityId = SecurityId, ticker = "DEMO", name = "Демонстрационная акция", quantity = "25", version = 1 } },
-                "api/valuations" => new { valuation, unitPrice = "25" },
+                "api/valuations" => new { valuation, unitPrice = "25", unitsOutstanding = "100", positions = new[]
+                {
+                    new { securityId = SecurityId, ticker = "DEMO", name = "Учебная бумага", quantity = "25", price = "100", positionValue = "2500" }
+                } },
                 "api/funds/{id}/valuations" => new[] { valuation },
                 "api/prices" => price,
                 "api/fund-units" => units,
@@ -233,7 +236,6 @@ internal sealed record PositionResponse(Guid CustodyAccountId, string AccountNum
 /// <param name="Operation">Сохранённые реквизиты операции.</param>
 /// <param name="Entries">Проводки со знаковым изменением количества по счетам.</param>
 internal sealed record OperationDetailsResponse(Operation Operation, List<LedgerEntry> Entries);
-/// <summary>Упрощённая оценка фонда и стоимость пая.</summary>
-/// <param name="Valuation">Сохранённая оценка активов и обязательств фонда.</param>
-/// <param name="UnitPrice">Стоимость одного пая в валюте оценки, передаётся JSON-строкой.</param>
-internal sealed record ValuationResponse(FundValuation Valuation, decimal UnitPrice);
+/// <summary>Реквизиты фонда и действующее количество паёв. При отсутствии записи количество равно null.</summary>
+internal sealed record FundDetailsResponse(Guid Id, Guid ManagementCompanyId, string Code, string Name,
+    string FundType, string Status, decimal? UnitsOutstanding);

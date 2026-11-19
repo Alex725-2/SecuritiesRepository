@@ -154,9 +154,35 @@ public class PostgresTests
         await using var container = c;
         await using var db = Db(cs);
         var service = new PortfolioService(db);
-        await service.Value(new(Guid.Parse("20000000-0000-0000-0000-000000000001"), DateOnly.FromDateTime(DateTime.UtcNow), 0, "RUB"), default);
+        var units = await db.Set<FundUnits>().SingleAsync();
+        var date = units.EffectiveDate;
+        units.UnitsOutstanding = 12.5m;
+        db.Add(new FundUnits { FundId = units.FundId, EffectiveDate = date.AddDays(1), UnitsOutstanding = 50m });
+        await db.SaveChangesAsync();
+
+        Assert.Null(await service.UnitsOnDate(units.FundId, date.AddDays(-1), default));
+        Assert.Equal(12.5m, await service.UnitsOnDate(units.FundId, date, default));
+        Assert.Equal(50m, await service.UnitsOnDate(units.FundId, date.AddDays(1), default));
+        var request = new ValuationRequest(units.FundId, date, 250m, "RUB");
+        var result = await service.Value(request, default);
+        var position = Assert.Single(result.Positions);
+        Assert.Equal(S, position.SecurityId);
+        Assert.Equal(100m, position.Quantity);
+        Assert.Equal(100m, position.Price);
+        Assert.Equal("10000", position.PositionValue);
+        Assert.Equal(10000m, result.Valuation.TotalAssets);
+        Assert.Equal(250m, result.Valuation.TotalLiabilities);
+        Assert.Equal(9750m, result.Valuation.NAV);
+        Assert.Equal(12.5m, result.UnitsOutstanding);
+        Assert.Equal(780m, result.UnitPrice);
+        var saved = await db.Set<FundValuation>().AsNoTracking().SingleAsync();
+        Assert.Equal(result.Valuation.TotalAssets, saved.TotalAssets);
+        Assert.Equal(result.Valuation.TotalLiabilities, saved.TotalLiabilities);
+        Assert.Equal(result.Valuation.NAV, saved.NAV);
+
+        await Assert.ThrowsAsync<BusinessException>(() => service.Value(request with { Date = date.AddDays(-1) }, default));
         await db.Set<SecurityPrice>().ExecuteDeleteAsync();
-        await Assert.ThrowsAsync<BusinessException>(() => service.Value(new(Guid.Parse("20000000-0000-0000-0000-000000000001"), DateOnly.FromDateTime(DateTime.UtcNow), 0, "RUB"), default));
+        await Assert.ThrowsAsync<BusinessException>(() => service.Value(request, default));
     }
 
     /// <summary>Проверяет атомарность при ошибке SQL внутри записи Outbox.</summary>
