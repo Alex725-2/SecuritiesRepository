@@ -5,6 +5,7 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.Options;
 using Securities.Application;
 using Securities.Domain;
 using Securities.Infrastructure;
@@ -23,6 +24,9 @@ builder.Services.AddDbContext<AccountingDb>(o => o.UseNpgsql(connection));
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new DecimalJsonConverter()));
 builder.Services.AddScoped<AccountingService>();
 builder.Services.AddScoped<PortfolioService>();
+builder.Services.AddOptions<ValuationOptions>().BindConfiguration("Valuation")
+    .Validate(options => options.MaxPriceAgeDays >= 0, "Valuation:MaxPriceAgeDays must be non-negative.")
+    .ValidateOnStart();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o => o.TokenValidationParameters = new TokenValidationParameters { ValidateIssuer = true, ValidIssuer = "securities-demo", ValidateAudience = true, ValidAudience = "securities-demo", ValidateIssuerSigningKey = true, IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)), ValidateLifetime = true, ClockSkew = TimeSpan.FromSeconds(10) });
 builder.Services.AddAuthorization(o =>
 {
@@ -119,6 +123,18 @@ read.MapGet("/funds/{id:guid}/operations", async (Guid id, int? offset, int? lim
 read.MapGet("/securities", async (AccountingDb db, CancellationToken ct) => await db.Securities.AsNoTracking().ToListAsync(ct))
     .WithSummary("Получить ценные бумаги")
     .WithDescription("Возвращает справочник, включая неактивные бумаги.");
+read.MapGet("/securities/{id:guid}/prices", async (Guid id, AccountingDb db, CancellationToken ct) =>
+{
+    if (!await db.Securities.AnyAsync(x => x.Id == id, ct))
+        return Results.NotFound();
+    var prices = await db.Set<SecurityPrice>().AsNoTracking().Where(x => x.SecurityId == id)
+        .OrderByDescending(x => x.PriceDate).ToListAsync(ct);
+    return Results.Ok(prices);
+})
+    .WithSummary("Получить историю котировок бумаги")
+    .WithDescription("Возвращает котировки от новых к старым. Для бумаги без котировок возвращает пустой список.")
+    .Produces<List<SecurityPrice>>()
+    .Produces(StatusCodes.Status404NotFound);
 read.MapGet("/custodians", async (AccountingDb db, CancellationToken ct) => await db.Set<Custodian>().AsNoTracking().ToListAsync(ct))
     .WithSummary("Получить депозитарии")
     .WithDescription("Возвращает справочник организаций, в которых открыты счета хранения.");
@@ -152,9 +168,11 @@ read.MapGet("/reconciliations/{id:guid}", async (Guid id, AccountingDb db, Cance
 read.MapGet("/funds/{id:guid}/reconciliations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<ReconciliationRun>().Include(x => x.Items).AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.CreatedAt).Take(20).ToListAsync(ct))
     .WithSummary("Получить сверки фонда")
     .WithDescription("Возвращает до 20 последних сверок фонда вместе со строками сравнения.");
+read.MapGet("/valuations/settings", (IOptions<ValuationOptions> options) => options.Value)
+    .WithSummary("Получить настройки выбора котировок");
 write.MapPost("/valuations", (ValuationRequest r, PortfolioService s, CancellationToken ct) => s.Value(r, ct))
     .WithSummary("Рассчитать стоимость фонда и пая")
-    .WithDescription("Восстанавливает позиции по журналу на конец даты UTC. Использует котировки на эту дату в единой валюте и последние доступные на дату данные о паях. Сохраняет оценку по паре фонд и дата.")
+    .WithDescription("Восстанавливает позиции по журналу на конец даты UTC. Для каждой бумаги использует последнюю котировку на дату оценки или ранее с учётом предельного возраста и единой валюты. Количество паёв берёт на дату оценки. Сохраняет оценку по паре фонд и дата.")
     .Produces<ValuationResponse>();
 read.MapGet("/funds/{id:guid}/valuations", async (Guid id, AccountingDb db, CancellationToken ct) => await db.Set<FundValuation>().AsNoTracking().Where(x => x.FundId == id).OrderByDescending(x => x.ValuationDate).Take(100).ToListAsync(ct))
     .WithSummary("Получить оценки фонда")

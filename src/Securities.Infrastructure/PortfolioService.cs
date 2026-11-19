@@ -1,12 +1,15 @@
 using System.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Securities.Application;
 using Securities.Domain;
 
 namespace Securities.Infrastructure;
 /// <summary>Упрощённая оценка и ручная сверка снимка позиций.</summary>
-public sealed class PortfolioService(AccountingDb db)
+public sealed class PortfolioService(AccountingDb db, IOptions<ValuationOptions>? options = null)
 {
+    private readonly int maxPriceAgeDays = (options?.Value ?? new ValuationOptions()).MaxPriceAgeDays;
+
     /// <summary>Возвращает последнее действующее на указанную дату количество паёв фонда.</summary>
     public Task<decimal?> UnitsOnDate(Guid fundId, DateOnly date, CancellationToken ct) =>
         db.Set<FundUnits>().Where(x => x.FundId == fundId && x.EffectiveDate <= date)
@@ -36,16 +39,21 @@ public sealed class PortfolioService(AccountingDb db)
                 }
 
         ).ToListAsync(ct);
-        var positions = new List<(Security Security, decimal Quantity, decimal Price)>();
+        var positions = new List<(Security Security, decimal Quantity, SecurityPrice Quote)>();
         foreach (var p in quantities.Where(x => x.Quantity != 0))
         {
-            var price = await db.Set<SecurityPrice>().SingleOrDefaultAsync(x => x.SecurityId == p.SecurityId && x.PriceDate == r.Date, ct);
+            var price = await db.Set<SecurityPrice>().AsNoTracking()
+                .Where(x => x.SecurityId == p.SecurityId && x.PriceDate <= r.Date)
+                .OrderByDescending(x => x.PriceDate)
+                .FirstOrDefaultAsync(ct);
             if (price is null)
-                throw new BusinessException($"Нет котировки {p.SecurityId} на {r.Date}.");
+                throw new BusinessException($"Для бумаги {p.SecurityId} нужна котировка на {r.Date:yyyy-MM-dd} или ранее. Добавьте её в разделе «Котировки».");
+            if (r.Date.DayNumber - price.PriceDate.DayNumber > maxPriceAgeDays)
+                throw new BusinessException($"Последняя котировка бумаги {p.SecurityId} от {price.PriceDate:yyyy-MM-dd} слишком старая для оценки на {r.Date:yyyy-MM-dd}. Допустимый возраст в календарных днях — {maxPriceAgeDays}. Добавьте более свежую котировку в разделе «Котировки».");
             var security = await db.Securities.SingleAsync(x => x.Id == p.SecurityId, ct);
             if (price.Currency != r.Currency || security.Currency != r.Currency)
                 throw new BusinessException("Валюты различаются; конвертация в MVP отсутствует.");
-            positions.Add((security, p.Quantity, price.Price));
+            positions.Add((security, p.Quantity, price));
         }
 
         var units = await UnitsOnDate(r.FundId, r.Date, ct);
@@ -62,7 +70,7 @@ public sealed class PortfolioService(AccountingDb db)
             db.Add(valuation);
         }
 
-        var assets = AccountingRules.TotalValue(positions.Select(p => (p.Quantity, p.Price)));
+        var assets = AccountingRules.TotalValue(positions.Select(p => (p.Quantity, p.Quote.Price)));
         valuation.TotalAssets = assets;
         valuation.TotalLiabilities = AccountingRules.Normalize(r.Liabilities);
         valuation.NAV = AccountingRules.Normalize(assets - valuation.TotalLiabilities);
@@ -70,7 +78,7 @@ public sealed class PortfolioService(AccountingDb db)
         var unitPrice = AccountingRules.UnitPrice(valuation.NAV, units.Value);
         var details = positions.OrderBy(p => p.Security.Ticker, StringComparer.Ordinal).ThenBy(p => p.Security.Id)
             .Select(p => new ValuationPosition(p.Security.Id, p.Security.Ticker, p.Security.Name,
-                p.Quantity, p.Price, AccountingRules.ExactPositionValue(p.Quantity, p.Price)))
+                p.Quantity, p.Quote.Price, p.Quote.PriceDate, AccountingRules.ExactPositionValue(p.Quantity, p.Quote.Price)))
             .ToList();
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);

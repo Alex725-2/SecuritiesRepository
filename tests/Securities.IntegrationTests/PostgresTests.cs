@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Securities.Application;
 using Securities.Domain;
 using Securities.Infrastructure;
@@ -158,6 +159,7 @@ public class PostgresTests
         var date = units.EffectiveDate;
         units.UnitsOutstanding = 12.5m;
         db.Add(new FundUnits { FundId = units.FundId, EffectiveDate = date.AddDays(1), UnitsOutstanding = 50m });
+        db.Add(new SecurityPrice { SecurityId = S, PriceDate = date.AddDays(-1), Price = 90m, Currency = "RUB", Source = "Тест" });
         await db.SaveChangesAsync();
 
         Assert.Null(await service.UnitsOnDate(units.FundId, date.AddDays(-1), default));
@@ -169,6 +171,7 @@ public class PostgresTests
         Assert.Equal(S, position.SecurityId);
         Assert.Equal(100m, position.Quantity);
         Assert.Equal(100m, position.Price);
+        Assert.Equal(date, position.PriceDate);
         Assert.Equal("10000", position.PositionValue);
         Assert.Equal(10000m, result.Valuation.TotalAssets);
         Assert.Equal(250m, result.Valuation.TotalLiabilities);
@@ -183,6 +186,73 @@ public class PostgresTests
         await Assert.ThrowsAsync<BusinessException>(() => service.Value(request with { Date = date.AddDays(-1) }, default));
         await db.Set<SecurityPrice>().ExecuteDeleteAsync();
         await Assert.ThrowsAsync<BusinessException>(() => service.Value(request, default));
+    }
+
+    /// <summary>Выбирает последнюю допустимую цену отдельно для каждой бумаги и сохраняет общий итог.</summary>
+    [PostgresFact]
+    public async Task ValuationUsesLatestPriceForEachSecurity()
+    {
+        var (c, cs) = await Start();
+        await using var container = c;
+        await using var db = Db(cs);
+        var units = await db.Set<FundUnits>().SingleAsync();
+        var date = units.EffectiveDate;
+        var secondSecurity = Guid.NewGuid();
+        db.Securities.Add(new Security { Id = secondSecurity, ISIN = "OTHER0000001", Ticker = "OTHER", Name = "Другая бумага" });
+        await db.Set<SecurityPrice>().ExecuteDeleteAsync();
+        db.AddRange(
+            new SecurityPrice { SecurityId = S, PriceDate = date.AddDays(-2), Price = 90m, Currency = "RUB", Source = "Тест" },
+            new SecurityPrice { SecurityId = S, PriceDate = date.AddDays(-1), Price = 95m, Currency = "RUB", Source = "Тест" },
+            new SecurityPrice { SecurityId = S, PriceDate = date.AddDays(1), Price = 120m, Currency = "RUB", Source = "Тест" },
+            new SecurityPrice { SecurityId = secondSecurity, PriceDate = date.AddDays(-30), Price = 10.25m, Currency = "RUB", Source = "Тест" });
+        await db.SaveChangesAsync();
+        await new AccountingService(db).Execute("Credit", new("credit-other", A, null, secondSecurity, 2.5m, "external", "doc"));
+
+        var result = await new PortfolioService(db).Value(new(units.FundId, date, 0m, "RUB"), default);
+        Assert.Equal(2, result.Positions.Count);
+        var first = Assert.Single(result.Positions, x => x.SecurityId == S);
+        Assert.Equal(date.AddDays(-1), first.PriceDate);
+        Assert.Equal(95m, first.Price);
+        Assert.Equal("9500", first.PositionValue);
+        var second = Assert.Single(result.Positions, x => x.SecurityId == secondSecurity);
+        Assert.Equal(date.AddDays(-30), second.PriceDate);
+        Assert.Equal("25.625", second.PositionValue);
+        Assert.Equal(9525.625m, result.Valuation.TotalAssets);
+        Assert.Equal(result.Valuation.TotalAssets, (await db.Set<FundValuation>().AsNoTracking().SingleAsync()).TotalAssets);
+    }
+
+    /// <summary>Отклоняет отсутствующие, будущие и слишком старые котировки до записи оценки.</summary>
+    [PostgresFact]
+    public async Task ValuationRejectsMissingFutureAndStalePrices()
+    {
+        var (c, cs) = await Start();
+        await using var container = c;
+        await using var db = Db(cs);
+        var units = await db.Set<FundUnits>().SingleAsync();
+        var date = units.EffectiveDate;
+        var request = new ValuationRequest(units.FundId, date, 0m, "RUB");
+        var service = new PortfolioService(db);
+        await db.Set<SecurityPrice>().ExecuteDeleteAsync();
+        var missing = await Assert.ThrowsAsync<BusinessException>(() => service.Value(request, default));
+        Assert.Contains(S.ToString(), missing.Message);
+        Assert.Equal(422, missing.Status);
+
+        db.Add(new SecurityPrice { SecurityId = S, PriceDate = date.AddDays(1), Price = 120m, Currency = "RUB", Source = "Тест" });
+        await db.SaveChangesAsync();
+        var future = await Assert.ThrowsAsync<BusinessException>(() => service.Value(request, default));
+        Assert.Equal(missing.Message, future.Message);
+
+        var staleDate = date.AddDays(-31);
+        db.Add(new SecurityPrice { SecurityId = S, PriceDate = staleDate, Price = 90m, Currency = "RUB", Source = "Тест" });
+        await db.SaveChangesAsync();
+        var stale = await Assert.ThrowsAsync<BusinessException>(() => service.Value(request, default));
+        Assert.Contains(S.ToString(), stale.Message);
+        Assert.Contains("слишком старая", stale.Message);
+        Assert.False(await db.Set<FundValuation>().AnyAsync());
+
+        var configuredService = new PortfolioService(db, Options.Create(new ValuationOptions { MaxPriceAgeDays = 31 }));
+        var result = await configuredService.Value(request, default);
+        Assert.Equal(staleDate, Assert.Single(result.Positions).PriceDate);
     }
 
     /// <summary>Проверяет атомарность при ошибке SQL внутри записи Outbox.</summary>

@@ -71,6 +71,7 @@ internal sealed class ApiDocumentation : IOperationFilter
                 "offset" => "Количество пропускаемых записей. По умолчанию 0, отрицательное значение заменяется на 0.",
                 "limit" => "Размер страницы. По умолчанию 100, значение ограничивается диапазоном 1–200.",
                 "id" when path?.StartsWith("api/funds/") == true => "Идентификатор фонда (UUID).",
+                "id" when path == "api/securities/{id}/prices" => "Идентификатор ценной бумаги (UUID).",
                 "id" when path?.StartsWith("api/operations/") == true => "Идентификатор операции (UUID).",
                 "id" when path == "api/reconciliations/{id}" => "Идентификатор сохранённой сверки (UUID).",
                 _ => parameter.Description
@@ -176,11 +177,13 @@ internal sealed class ApiDocumentation : IOperationFilter
                 },
                 "api/funds/{id}/positions" => new[] { new { custodyAccountId = AccountId, accountNumber = "DEMO-001",
                     securityId = SecurityId, ticker = "DEMO", name = "Демонстрационная акция", quantity = "25", version = 1 } },
+                "api/valuations/settings" => new ValuationOptions(),
                 "api/valuations" => new { valuation, unitPrice = "25", unitsOutstanding = "100", positions = new[]
                 {
-                    new { securityId = SecurityId, ticker = "DEMO", name = "Учебная бумага", quantity = "25", price = "100", positionValue = "2500" }
+                    new { securityId = SecurityId, ticker = "DEMO", name = "Учебная бумага", quantity = "25", price = "100", priceDate = Date, positionValue = "2500" }
                 } },
                 "api/funds/{id}/valuations" => new[] { valuation },
+                "api/securities/{id}/prices" => new[] { price },
                 "api/prices" => price,
                 "api/fund-units" => units,
                 _ => null

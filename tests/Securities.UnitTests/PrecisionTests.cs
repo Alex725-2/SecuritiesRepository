@@ -41,6 +41,20 @@ public class PrecisionTests
         Assert.Throws<BusinessException>(() => AccountingRules.UnitPrice(99999999999999999999m, 0.00000001m));
     }
 
+    /// <summary>Returns the quote date as an ISO calendar date and preserves exact amounts.</summary>
+    [Fact]
+    public void ValuationPositionJsonIncludesQuoteDate()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new DecimalJsonConverter());
+        var position = new ValuationPosition(Guid.NewGuid(), "TEST", "Test", 0.00000001m, 0.5m,
+            new DateOnly(2026, 11, 18), "0.000000005");
+        var json = JsonSerializer.SerializeToElement(position, options);
+        Assert.Equal("2026-11-18", json.GetProperty("priceDate").GetString());
+        Assert.Equal("0.5", json.GetProperty("price").GetString());
+        Assert.Equal("0.000000005", json.GetProperty("positionValue").GetString());
+    }
+
     /// <summary>Rejects decimal strings that System.Decimal would silently round.</summary>
     [Fact]
     public void DecimalJsonRejectsLossOfPrecision()

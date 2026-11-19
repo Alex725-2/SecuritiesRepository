@@ -103,7 +103,9 @@ Content-Type: application/json
 
 Сверка: `POST /api/reconciliations` с `{fundId, balances:[{custodyAccountId, securityId, quantity}]}`. Передаётся **полный** набор фонда; отсутствующий остаток считается нулём. Ответ содержит ожидаемые и фактические количества всех пар. Чтение: `/api/reconciliations/{id}`, `/api/funds/{id}/reconciliations`.
 
-Оценка: `POST /api/valuations` с `{fundId, date:"2026-11-16", liabilities:"0", currency:"RUB"}`. Дата должна соответствовать имеющимся котировкам; seed создаёт их на текущую дату UTC. Ответ `{valuation, unitPrice}`. `PUT /api/prices` сохраняет `{securityId,priceDate,price,currency,source}`, `PUT /api/fund-units` — `{fundId,effectiveDate,unitsOutstanding}`. Чтение сохранённых оценок: `/api/funds/{id}/valuations`.
+Для оценки отправьте `POST /api/valuations` с `{fundId, date:"2026-11-16", liabilities:"0", currency:"RUB"}`. Для каждой бумаги используется последняя котировка на дату оценки или ранее. Максимальный возраст по умолчанию равен 30 календарным дням включительно. Его можно задать через `Valuation:MaxPriceAgeDays` (переменная окружения `Valuation__MaxPriceAgeDays`). Значение `0` допускает только котировки на дату оценки. `GET /api/valuations/settings` возвращает действующий лимит для подсказки в интерфейсе.
+
+Ответ оценки содержит `{valuation, unitPrice, unitsOutstanding, positions}`. Фактическая дата котировки возвращается в `positions[].priceDate`. `PUT /api/prices` сохраняет `{securityId,priceDate,price,currency,source}`, `PUT /api/fund-units` — `{fundId,effectiveDate,unitsOutstanding}`. Сохранённые оценки доступны через `GET /api/funds/{id}/valuations`.
 
 ## Тестирование
 

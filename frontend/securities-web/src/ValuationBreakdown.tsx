@@ -19,6 +19,7 @@ export type ValuationResult = {
     name: string;
     quantity: string;
     price: string;
+    priceDate: string;
     positionValue: string;
   }[];
 };
@@ -26,6 +27,7 @@ export type ValuationResult = {
 export function ValuationBreakdown({result}: {result: ValuationResult}) {
   const {valuation, positions, unitsOutstanding, unitPrice} = result;
   const {valuationDate, totalAssets, totalLiabilities, nav, currency} = valuation;
+  const hasEarlierQuotes = positions.some(position => position.priceDate < valuationDate);
 
   return <section className="panel">
     <h2>Расшифровка оценки на {valuationDate}</h2>
@@ -36,6 +38,7 @@ export function ValuationBreakdown({result}: {result: ValuationResult}) {
           <th scope="col">Ценная бумага</th>
           <th scope="col" className="number">Количество</th>
           <th scope="col" className="number">Цена, {currency}</th>
+          <th scope="col">Дата котировки</th>
           <th scope="col" className="number">Стоимость позиции, {currency}</th>
         </tr></thead>
         <tbody>{positions.map(position => <tr key={position.securityId}>
@@ -44,9 +47,13 @@ export function ValuationBreakdown({result}: {result: ValuationResult}) {
           </td>
           <td className="number">{position.quantity}</td>
           <td className="number">{position.price}</td>
+          <td>{position.priceDate}
+            {position.priceDate < valuationDate && <small className="id">Ранее даты оценки</small>}
+          </td>
           <td className="number">{position.positionValue}</td>
         </tr>)}</tbody>
       </table>
+      {hasEarlierQuotes && <p className="muted">Использована последняя доступная котировка на дату оценки или ранее.</p>}
       <p className="muted">Сумма стоимостей позиций округляется до 8 знаков после запятой.</p>
     </> : <p>На дату оценки нет позиций с ненулевым количеством.</p>}
     <p>Итого активы <strong>{totalAssets} {currency}</strong></p>
